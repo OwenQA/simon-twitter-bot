@@ -4,11 +4,12 @@ const Parser = require('rss-parser');
 const fs = require('fs');
 const path = require('path');
 
-// Configuration
+// Configuration - Support multiple accounts (comma-separated)
 const config = {
     discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL,
     twitterBearerToken: process.env.TWITTER_BEARER_TOKEN,
-    twitterUsername: process.env.TWITTER_USERNAME || 'simon_hypixel',
+    // Support comma-separated usernames
+    twitterUsernames: (process.env.TWITTER_USERNAMES || process.env.TWITTER_USERNAME || 'simon_hypixel').split(',').map(u => u.trim()),
     checkIntervalMinutes: parseInt(process.env.CHECK_INTERVAL_MINUTES) || 5,
     useNitter: process.env.USE_NITTER === 'true',
     nitterInstance: process.env.NITTER_INSTANCE || 'nitter.privacydev.net'
@@ -43,8 +44,8 @@ function saveProcessedTweets(tweets) {
 
 let processedTweets = loadProcessedTweets();
 
-// Cache for user profile data
-let cachedUserProfile = null;
+// Cache for user profile data (keyed by username)
+let cachedUserProfiles = {};
 
 // Discord embed colors
 const COLORS = {
@@ -54,23 +55,23 @@ const COLORS = {
     quote: 0xFFAD1F       // Orange for quote tweets
 };
 
-// Fetch user profile (name and avatar)
-async function fetchUserProfile() {
-    if (cachedUserProfile) {
-        return cachedUserProfile;
+// Fetch user profile (name and avatar) for a specific username
+async function fetchUserProfile(username) {
+    if (cachedUserProfiles[username]) {
+        return cachedUserProfiles[username];
     }
 
     if (!config.twitterBearerToken) {
         return {
-            name: config.twitterUsername,
-            username: config.twitterUsername,
+            name: username,
+            username: username,
             profileImageUrl: 'https://abs.twimg.com/icons/apple-touch-icon-192x192.png'
         };
     }
 
     try {
         const response = await axios.get(
-            `https://api.twitter.com/2/users/by/username/${config.twitterUsername}`,
+            `https://api.twitter.com/2/users/by/username/${username}`,
             {
                 headers: { 'Authorization': `Bearer ${config.twitterBearerToken}` },
                 params: {
@@ -85,7 +86,7 @@ async function fetchUserProfile() {
             const profileImageUrl = user.profile_image_url?.replace('_normal', '_400x400') || 
                                    'https://abs.twimg.com/icons/apple-touch-icon-192x192.png';
             
-            cachedUserProfile = {
+            cachedUserProfiles[username] = {
                 id: user.id,
                 name: user.name,
                 username: user.username,
@@ -94,15 +95,15 @@ async function fetchUserProfile() {
             };
             
             console.log(`✅ Loaded profile for ${user.name} (@${user.username})`);
-            return cachedUserProfile;
+            return cachedUserProfiles[username];
         }
     } catch (error) {
-        console.error('❌ Error fetching user profile:', error.response?.data || error.message);
+        console.error(`❌ Error fetching user profile for @${username}:`, error.response?.data || error.message);
     }
 
     return {
-        name: config.twitterUsername,
-        username: config.twitterUsername,
+        name: username,
+        username: username,
         profileImageUrl: 'https://abs.twimg.com/icons/apple-touch-icon-192x192.png'
     };
 }
@@ -116,7 +117,7 @@ async function sendToDiscord(embed, userProfile) {
 
     try {
         await axios.post(config.discordWebhookUrl, {
-            username: userProfile?.name || config.twitterUsername,
+            username: userProfile?.name || 'Twitter Bot',
             avatar_url: userProfile?.profileImageUrl || 'https://abs.twimg.com/icons/apple-touch-icon-192x192.png',
             embeds: [embed]
         });
@@ -148,8 +149,8 @@ function createTweetEmbed(tweet, userProfile) {
         title = '💭 Quote Tweet';
     }
 
-    const displayName = userProfile?.name || config.twitterUsername;
-    const username = userProfile?.username || config.twitterUsername;
+    const displayName = userProfile?.name || tweet.username;
+    const username = userProfile?.username || tweet.username;
     const avatarUrl = userProfile?.profileImageUrl || 'https://abs.twimg.com/icons/apple-touch-icon-192x192.png';
 
     const embed = {
@@ -191,8 +192,8 @@ function createTweetEmbed(tweet, userProfile) {
     return embed;
 }
 
-// Fetch tweets using Twitter API v2
-async function fetchTweetsFromAPI() {
+// Fetch tweets using Twitter API v2 for a specific username
+async function fetchTweetsFromAPI(username) {
     if (!config.twitterBearerToken) {
         console.log('⚠️ No Twitter Bearer Token, skipping API fetch');
         return [];
@@ -201,7 +202,7 @@ async function fetchTweetsFromAPI() {
     try {
         // First, get user ID
         const userResponse = await axios.get(
-            `https://api.twitter.com/2/users/by/username/${config.twitterUsername}`,
+            `https://api.twitter.com/2/users/by/username/${username}`,
             {
                 headers: { 'Authorization': `Bearer ${config.twitterBearerToken}` }
             }
@@ -209,7 +210,7 @@ async function fetchTweetsFromAPI() {
 
         const userId = userResponse.data.data?.id;
         if (!userId) {
-            console.error('❌ Could not find Twitter user:', config.twitterUsername);
+            console.error(`❌ Could not find Twitter user: ${username}`);
             return [];
         }
 
@@ -238,8 +239,9 @@ async function fetchTweetsFromAPI() {
             return {
                 id: tweet.id,
                 text: tweet.text,
+                username: username,
                 createdAt: tweet.created_at,
-                url: `https://twitter.com/${config.twitterUsername}/status/${tweet.id}`,
+                url: `https://twitter.com/${username}/status/${tweet.id}`,
                 isReply: tweet.referenced_tweets?.some(rt => rt.type === 'replied_to'),
                 isRetweet: tweet.referenced_tweets?.some(rt => rt.type === 'retweeted'),
                 isQuote: tweet.referenced_tweets?.some(rt => rt.type === 'quoted'),
@@ -249,13 +251,13 @@ async function fetchTweetsFromAPI() {
             };
         });
     } catch (error) {
-        console.error('❌ Error fetching from Twitter API:', error.response?.data || error.message);
+        console.error(`❌ Error fetching from Twitter API for @${username}:`, error.response?.data || error.message);
         return [];
     }
 }
 
-// Fetch tweets using Nitter RSS (no API key needed)
-async function fetchTweetsFromNitter() {
+// Fetch tweets using Nitter RSS (no API key needed) for a specific username
+async function fetchTweetsFromNitter(username) {
     const parser = new Parser({
         customFields: {
             item: ['media:content', 'media:thumbnail']
@@ -272,17 +274,17 @@ async function fetchTweetsFromNitter() {
 
     for (const instance of nitterInstances) {
         try {
-            console.log(`📡 Trying Nitter instance: ${instance}`);
-            const rssUrl = `https://${instance}/${config.twitterUsername}/rss`;
+            console.log(`📡 Trying Nitter instance: ${instance} for @${username}`);
+            const rssUrl = `https://${instance}/${username}/rss`;
             
             const feed = await parser.parseURL(rssUrl);
             
             if (!feed.items || feed.items.length === 0) {
-                console.log(`⚠️ No items from ${instance}`);
+                console.log(`⚠️ No items from ${instance} for @${username}`);
                 continue;
             }
 
-            console.log(`✅ Got ${feed.items.length} items from ${instance}`);
+            console.log(`✅ Got ${feed.items.length} items from ${instance} for @${username}`);
 
             return feed.items.map(item => {
                 // Extract image from content if present
@@ -305,8 +307,9 @@ async function fetchTweetsFromNitter() {
                 return {
                     id: tweetId,
                     text: text,
+                    username: username,
                     createdAt: item.pubDate || item.isoDate,
-                    url: item.link?.replace(instance, 'twitter.com') || `https://twitter.com/${config.twitterUsername}`,
+                    url: item.link?.replace(instance, 'twitter.com') || `https://twitter.com/${username}`,
                     isReply: text.startsWith('@') || item.title?.includes('replying to'),
                     isRetweet: text.startsWith('RT @') || item.title?.startsWith('RT'),
                     isQuote: false,
@@ -314,37 +317,37 @@ async function fetchTweetsFromNitter() {
                 };
             });
         } catch (error) {
-            console.error(`❌ Error with ${instance}:`, error.message);
+            console.error(`❌ Error with ${instance} for @${username}:`, error.message);
             continue;
         }
     }
 
-    console.error('❌ All Nitter instances failed');
+    console.error(`❌ All Nitter instances failed for @${username}`);
     return [];
 }
 
-// Main function to check for new tweets
-async function checkForNewTweets() {
-    console.log(`\n🔍 Checking for new tweets from @${config.twitterUsername}...`);
+// Check tweets for a single user
+async function checkTweetsForUser(username) {
+    console.log(`\n🔍 Checking tweets from @${username}...`);
     
     let tweets = [];
 
     // Try Twitter API first, then fall back to Nitter
     if (!config.useNitter && config.twitterBearerToken) {
-        tweets = await fetchTweetsFromAPI();
+        tweets = await fetchTweetsFromAPI(username);
     }
     
     if (tweets.length === 0) {
-        console.log('📡 Using Nitter RSS feed...');
-        tweets = await fetchTweetsFromNitter();
+        console.log(`📡 Using Nitter RSS feed for @${username}...`);
+        tweets = await fetchTweetsFromNitter(username);
     }
 
     if (tweets.length === 0) {
-        console.log('⚠️ No tweets found');
-        return;
+        console.log(`⚠️ No tweets found for @${username}`);
+        return 0;
     }
 
-    console.log(`📊 Found ${tweets.length} tweets`);
+    console.log(`📊 Found ${tweets.length} tweets from @${username}`);
 
     // Process new tweets (oldest first so Discord shows them in order)
     const newTweets = tweets
@@ -352,14 +355,14 @@ async function checkForNewTweets() {
         .reverse();
 
     if (newTweets.length === 0) {
-        console.log('✓ No new tweets');
-        return;
+        console.log(`✓ No new tweets from @${username}`);
+        return 0;
     }
 
-    console.log(`🆕 ${newTweets.length} new tweet(s) to post`);
+    console.log(`🆕 ${newTweets.length} new tweet(s) from @${username}`);
 
     // Fetch user profile for embed
-    const userProfile = await fetchUserProfile();
+    const userProfile = await fetchUserProfile(username);
 
     for (const tweet of newTweets) {
         const embed = createTweetEmbed(tweet, userProfile);
@@ -373,16 +376,40 @@ async function checkForNewTweets() {
         await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
+    return newTweets.length;
+}
+
+// Main function to check for new tweets from all users
+async function checkForNewTweets() {
+    console.log('\n═══════════════════════════════════════════════════════');
+    console.log(`🔄 Checking ${config.twitterUsernames.length} account(s)...`);
+    console.log('═══════════════════════════════════════════════════════');
+    
+    let totalNew = 0;
+
+    for (const username of config.twitterUsernames) {
+        const newCount = await checkTweetsForUser(username);
+        totalNew += newCount;
+        
+        // Small delay between users to avoid rate limits
+        if (config.twitterUsernames.length > 1) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+    }
+
     // Save processed tweets
     saveProcessedTweets(processedTweets);
+    
+    console.log(`\n📈 Total new tweets posted: ${totalNew}`);
 }
 
 // Startup
 async function start() {
     console.log('═══════════════════════════════════════════════════════');
-    console.log('   Twitter to Discord Bot - @' + config.twitterUsername);
+    console.log('   Twitter to Discord Bot - Multi-Account');
     console.log('═══════════════════════════════════════════════════════');
-    console.log(`📌 Monitoring: @${config.twitterUsername}`);
+    console.log(`📌 Monitoring ${config.twitterUsernames.length} account(s):`);
+    config.twitterUsernames.forEach(u => console.log(`   • @${u}`));
     console.log(`⏱️  Check interval: ${config.checkIntervalMinutes} minutes`);
     console.log(`🔧 Using: ${config.useNitter ? 'Nitter RSS' : 'Twitter API'}`);
     console.log(`💬 Discord webhook: ${config.discordWebhookUrl ? '✅ Configured' : '❌ Not set!'}`);
@@ -393,11 +420,12 @@ async function start() {
         process.exit(1);
     }
 
-    // Fetch and display user profile at startup
-    const userProfile = await fetchUserProfile();
-    if (userProfile.name) {
-        console.log(`👤 User: ${userProfile.name} (@${userProfile.username})`);
-        console.log(`🖼️  Avatar: ${userProfile.profileImageUrl ? '✅ Loaded' : '❌ Default'}`);
+    // Fetch and display user profiles at startup
+    for (const username of config.twitterUsernames) {
+        const userProfile = await fetchUserProfile(username);
+        if (userProfile.name) {
+            console.log(`👤 ${userProfile.name} (@${userProfile.username}) - ${userProfile.profileImageUrl ? '✅ Avatar loaded' : '❌ Default avatar'}`);
+        }
     }
 
     // Initial check
