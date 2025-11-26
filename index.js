@@ -49,6 +49,13 @@ function saveProcessedTweets(tweets) {
 
 let processedTweets = loadProcessedTweets();
 
+// Reset processed tweets if requested (useful for forcing re-post of recent tweets)
+if (process.env.RESET_PROCESSED === 'true') {
+    console.log('🔄 RESET_PROCESSED=true, clearing processed tweets cache...');
+    processedTweets = new Set();
+    saveProcessedTweets(processedTweets);
+}
+
 // Cache for user profile data (keyed by username)
 const cachedUserProfiles = {};
 
