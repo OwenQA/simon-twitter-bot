@@ -1,6 +1,5 @@
 require('dotenv').config();
 const axios = require('axios');
-const Parser = require('rss-parser');
 const fs = require('fs');
 const path = require('path');
 
@@ -8,11 +7,9 @@ const path = require('path');
 const config = {
     discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL,
     twitterBearerToken: process.env.TWITTER_BEARER_TOKEN,
-    // Support multiple Twitter usernames (comma-separated)
     twitterUsernames: (process.env.TWITTER_USERNAMES || process.env.TWITTER_USERNAME || 'Hytale').split(',').map(u => u.trim()),
-    checkIntervalMinutes: parseInt(process.env.CHECK_INTERVAL_MINUTES) || 15, // Increased default to 15 min
-    useNitter: process.env.USE_NITTER === 'true',
-    nitterInstance: process.env.NITTER_INSTANCE || 'nitter.privacydev.net'
+    // Default to 60 min - Twitter free tier is very limited (1,500 tweets/month)
+    checkIntervalMinutes: parseInt(process.env.CHECK_INTERVAL_MINUTES) || 60
 };
 
 // File to store processed tweet IDs
@@ -328,27 +325,24 @@ async function fetchTweetsFromAPI(username) {
 }
 
 // Fetch tweets using Nitter RSS (no API key needed)
+// NOTE: Most Nitter instances are dead as of 2024 due to Twitter/X blocking them
 async function fetchTweetsFromNitter(username) {
+    console.log('⚠️ Note: Most Nitter instances are blocked by Twitter/X since 2024');
+    
     const parser = new Parser({
         customFields: {
             item: ['media:content', 'media:thumbnail']
         },
-        timeout: 15000
+        timeout: 10000
     });
 
-    // Updated list of Nitter instances (many are down, these are more likely to work)
+    // Most of these are dead, but we try anyway
     const nitterInstances = [
-        config.nitterInstance,
-        'nitter.privacydev.net',
         'nitter.poast.org',
-        'nitter.cz',
-        'nitter.1d4.us',
-        'nitter.kavin.rocks',
-        'nitter.unixfox.eu',
-        'nitter.fdn.fr',
-        'nitter.it',
-        'nitter.namazso.eu'
-    ].filter((v, i, a) => a.indexOf(v) === i); // Remove duplicates
+        'nitter.privacydev.net',
+        'nitter.net',
+        'nitter.cz'
+    ];
 
     for (const instance of nitterInstances) {
         try {
@@ -476,6 +470,13 @@ async function start() {
     console.log(`🔧 Using: ${config.useNitter ? 'Nitter RSS' : 'Twitter API (with Nitter fallback)'}`);
     console.log(`💬 Discord webhook: ${config.discordWebhookUrl ? '✅ Configured' : '❌ Not set!'}`);
     console.log(`🔑 Twitter API: ${config.twitterBearerToken ? '✅ Configured' : '⚠️ Not set (Nitter only)'}`);
+    console.log('');
+    console.log('⚠️  IMPORTANT: Twitter free tier = 1,500 tweets/month');
+    console.log('    With 2 accounts checked every 30min = ~2,880 API calls/month');
+    console.log('    You WILL hit rate limits. Consider:');
+    console.log('    - Increasing CHECK_INTERVAL_MINUTES to 60+');
+    console.log('    - Monitoring only 1 account');
+    console.log('    - Upgrading to Twitter API Basic ($100/mo)');
     console.log('═══════════════════════════════════════════════════════\n');
 
     if (!config.discordWebhookUrl) {
